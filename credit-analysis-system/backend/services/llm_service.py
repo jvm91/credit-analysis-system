@@ -92,9 +92,53 @@ class LLMService:
         
         for attempt in range(retry_attempts):
             try:
+                self.logger.info("LLM call started", attempt=attempt + 1)
+
+                response = await self.provider.call(messages)
+
+                self.logger.info("LLM call completed successfully")
+                return response
+
+            except Exception as e:
+                last_exception = e
+                self.logger.warning(
+                    "LLM call failed",
+                    attempt=attempt + 1,
+                    error=str(e)
+                )
+
+                if attempt < retry_attempts - 1:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+        self.logger.error(
+            "LLM call failed after all retries",
+            error=str(last_exception)
+        )
+        raise last_exception
+
+    async def call_with_tools(
+        self,
+        messages: List[BaseMessage],
+        tools: List[BaseTool],
+        retry_attempts: int = 3
+    ) -> Any:
+        """Вызов LLM с инструментами"""
+
+        last_exception = None
+
+        for attempt in range(retry_attempts):
+            try:
+                self.logger.info(
+                    "LLM call with tools started",
+                    attempt=attempt + 1,
+                    tools_count=len(tools)
+                )
+
+                response = await self.provider.call_with_tools(messages, tools)
+
                 self.logger.info("LLM call with tools completed successfully")
                 return response
-                
+
             except Exception as e:
                 last_exception = e
                 self.logger.warning(
@@ -102,32 +146,32 @@ class LLMService:
                     attempt=attempt + 1,
                     error=str(e)
                 )
-                
+
                 if attempt < retry_attempts - 1:
                     await asyncio.sleep(2 ** attempt)
-        
+
         self.logger.error(
             "LLM call with tools failed after all retries",
             error=str(last_exception)
         )
         raise last_exception
-    
+
     async def batch_call(
         self,
         messages_list: List[List[BaseMessage]],
         max_concurrent: int = 5
     ) -> List[Any]:
         """Batch вызов нескольких запросов"""
-        
+
         semaphore = asyncio.Semaphore(max_concurrent)
-        
+
         async def bounded_call(messages):
             async with semaphore:
                 return await self.call(messages)
-        
+
         tasks = [bounded_call(messages) for messages in messages_list]
         return await asyncio.gather(*tasks)
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         """Получение информации о модели"""
         return {
@@ -142,48 +186,4 @@ class LLMService:
 
 
 # Глобальный экземпляр сервиса
-llm_service = LLMService()("LLM call started", attempt=attempt + 1)
-                
-                response = await self.provider.call(messages)
-                
-                self.logger.info("LLM call completed successfully")
-                return response
-                
-            except Exception as e:
-                last_exception = e
-                self.logger.warning(
-                    "LLM call failed",
-                    attempt=attempt + 1,
-                    error=str(e)
-                )
-                
-                if attempt < retry_attempts - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
-        
-        self.logger.error(
-            "LLM call failed after all retries",
-            error=str(last_exception)
-        )
-        raise last_exception
-    
-    async def call_with_tools(
-        self,
-        messages: List[BaseMessage],
-        tools: List[BaseTool],
-        retry_attempts: int = 3
-    ) -> Any:
-        """Вызов LLM с инструментами"""
-        
-        last_exception = None
-        
-        for attempt in range(retry_attempts):
-            try:
-                self.logger.info(
-                    "LLM call with tools started",
-                    attempt=attempt + 1,
-                    tools_count=len(tools)
-                )
-                
-                response = await self.provider.call_with_tools(messages, tools)
-                
-                self.logger.info
+llm_service = LLMService()
