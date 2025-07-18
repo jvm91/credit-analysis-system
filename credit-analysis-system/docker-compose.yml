@@ -8,16 +8,38 @@ services:
       POSTGRES_DB: credit_analysis
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     ports:
       - "5432:5432"
     volumes:
+      # Persistent data storage
       - postgres_data:/var/lib/postgresql/data
-      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Инициализация БД
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./backend/database/migrations:/docker-entrypoint-initdb.d/migrations
+      # Конфигурация PostgreSQL
+      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d credit_analysis"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
+    restart: unless-stopped
 
   # Redis для кэширования и сессий
   redis:
@@ -25,12 +47,16 @@ services:
     ports:
       - "6379:6379"
     volumes:
+      # Persistent Redis data
       - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   # Backend API
   backend:
@@ -43,16 +69,30 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/credit_analysis
       - REDIS_URL=redis://redis:6379
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LOG_LEVEL=INFO
+      - DEBUG=true
+      - UPLOAD_DIR=/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
+      # Development mode - code sync
       - ./backend:/app
-      - ./uploads:/app/uploads
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      # Persistent uploads
+      - uploads_data:/app/uploads
+      # Logs
+      - logs_data:/app/logs
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # Frontend
   frontend:
@@ -60,15 +100,102 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3030:3030"
+      - "3000:3000"
     environment:
       - REACT_APP_API_URL=http://localhost:8000
       - REACT_APP_WS_URL=ws://localhost:8000
+      - NODE_ENV=development
     volumes:
+      # Development mode - code sync
       - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      # Node modules cache
+      - frontend_node_modules:/app/node_modules
     depends_on:
       - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Adminer для управления БД (опционально)
+  adminer:
+    image: adminer:4.8.1
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=postgres
+      - ADMINER_DESIGN=nette
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles:
+      - admin
+
+  # Nginx для production (опционально)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+      - static_files:/var/www/static
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    profiles:
+      - production
 
 volumes:
+  # PostgreSQL data
   postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/postgres
+
+  # Redis data
   redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/redis
+
+  # Uploads
+  uploads_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/uploads
+
+  # Logs
+  logs_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/logs
+
+  # Static files
+  static_files:
+    driver: local
+
+  # Frontend node_modules
+  frontend_node_modules:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
